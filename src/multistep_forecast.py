@@ -115,7 +115,13 @@ def make_windows(series: np.ndarray, window: int, horizon: int = 1) -> Tuple[np.
     -----
     The number of samples is N = T - window - horizon + 1.
     """
-    raise NotImplementedError
+    series = np.asarray(series, dtype=np.float32)
+    T = len(series)
+    N = T - window - horizon + 1
+    X = np.array([series[i:i + window] for i in range(N)], dtype=np.float32)
+    X = X.reshape(N, window, 1)
+    y = np.array([series[i + window:i + window + horizon] for i in range(N)], dtype=np.float32)
+    return X, y
 
 
 def time_split(
@@ -146,7 +152,21 @@ def time_split(
     ValueError
         If fractions are invalid or produce empty splits.
     """
-    raise NotImplementedError
+    if train_frac <= 0 or val_frac <= 0 or train_frac + val_frac >= 1.0:
+        raise ValueError("Invalid fractions: must be positive and sum to less than 1.")
+
+    N = len(X)
+    train_end = int(N * train_frac)
+    val_end = int(N * (train_frac + val_frac))
+
+    if train_end == 0 or val_end == train_end or val_end == N:
+        raise ValueError("One or more splits are empty. Adjust fractions or use more data.")
+
+    return (
+        (X[:train_end], y[:train_end]),
+        (X[train_end:val_end], y[train_end:val_end]),
+        (X[val_end:], y[val_end:]),
+    )
 
 
 # ----------------------------
@@ -190,7 +210,18 @@ def build_model(
     - For output_dim>1, use a Dense(output_dim) output layer (vector prediction).
     - Keep loss as MSE, metric MAE.
     """
-    raise NotImplementedError
+    model = tf.keras.Sequential([
+        tf.keras.layers.LSTM(n_units, input_shape=(window, 1)),
+        tf.keras.layers.Dropout(dropout),
+        tf.keras.layers.Dense(dense_units, activation='relu'),
+        tf.keras.layers.Dense(output_dim),
+    ])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        loss='mse',
+        metrics=['mae'],
+    )
+    return model
 
 
 def train_model(
@@ -243,7 +274,29 @@ def train_model(
     - Use EarlyStopping (recommended) to reduce overfitting.
     - Do not shuffle time.
     """
-    raise NotImplementedError
+    tf.keras.utils.set_random_seed(seed)
+
+    X, y = make_windows(series, window, horizon)
+    (X_train, y_train), (X_val, y_val), (X_test, y_test) = time_split(X, y, train_frac, val_frac)
+
+    model = build_model(window, output_dim=horizon)
+
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=5,
+        restore_best_weights=True,
+    )
+
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=[early_stop],
+        verbose=verbose,
+    )
+
+    return model, X_test, y_test
 
 
 # ----------------------------
@@ -278,7 +331,14 @@ def recursive_rollout_one_step(
     2) append it to the window
     3) shift window by 1
     """
-    raise NotImplementedError
+    window_buf = np.array(init_window, dtype=np.float32)
+    preds = []
+    for _ in range(horizon):
+        x = window_buf.reshape(1, len(window_buf), 1)
+        next_val = float(model.predict(x, verbose=0)[0, 0])
+        preds.append(next_val)
+        window_buf = np.append(window_buf[1:], next_val)
+    return np.array(preds, dtype=np.float32)
 
 
 def recursive_rollout_k_step_stride_k(
@@ -314,7 +374,15 @@ def recursive_rollout_k_step_stride_k(
 
     This reduces recursion depth (H/K calls).
     """
-    raise NotImplementedError
+    window_buf = np.array(init_window, dtype=np.float32)
+    preds = []
+    steps = horizon // k
+    for _ in range(steps):
+        x = window_buf.reshape(1, len(window_buf), 1)
+        block = model.predict(x, verbose=0)[0]  # shape (k,)
+        preds.extend(block.tolist())
+        window_buf = np.append(window_buf[k:], block)
+    return np.array(preds[:horizon], dtype=np.float32)
 
 
 def recursive_rollout_k_step_stride_1(
@@ -351,7 +419,15 @@ def recursive_rollout_k_step_stride_1(
 
     This uses the K-step model as a one-step generator.
     """
-    raise NotImplementedError
+    window_buf = np.array(init_window, dtype=np.float32)
+    preds = []
+    for _ in range(horizon):
+        x = window_buf.reshape(1, len(window_buf), 1)
+        block = model.predict(x, verbose=0)[0]  # shape (k,)
+        next_val = float(block[0])
+        preds.append(next_val)
+        window_buf = np.append(window_buf[1:], next_val)
+    return np.array(preds, dtype=np.float32)
 
 
 # ----------------------------
